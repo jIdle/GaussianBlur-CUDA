@@ -26,7 +26,7 @@ void errCatch(cudaError_t err) {
 // calculates elements according to the 2D Gaussian distribution
 __host__
 void generateGaussian(vector<double>& K, int dim, int radius) {
-	double stdev = 1.0;
+	double stdev = 5.0;
 	double pi = 355.0 / 113.0;
 	double constant = 1.0 / (2.0 * pi * pow(stdev, 2));
 
@@ -40,66 +40,67 @@ void generateGaussian(vector<double>& K, int dim, int radius) {
 
 // CUDA kernel, it performs the image convolution
 __global__
-void Gaussian(double* In, double* K, double* Out, int kDim, int kRadius, int inWidth, int inHeight, int outWidth, int outHeight) {
+void Gaussian(double* In, double* K, double* Out, int kDim, int inWidth, int outWidth) {
 	int outCol = (blockIdx.x * blockDim.x) + threadIdx.x;
 	int outRow = (blockIdx.y * blockDim.y) + threadIdx.y;
-	int inCol = outCol + kRadius; // Mapping from the output matrix elements to the input matrix elements
-	int inRow = outRow + kRadius;
 
-	if(outCol < outWidth && outRow < outHeight) { // Filter threads outside the range of the image
-		double acc = 0; 
-		int rowStart = inRow - kRadius; // Specifies top left element as the location to begin applying mask
-		int colStart = inCol - kRadius;
-
-		// Loop through mask elements
-		for (int i = 0; i < kDim; ++i)
-			for (int j = 0; j < kDim; ++j)
-				acc += In[(rowStart + i) * inWidth + (colStart + j)] * K[(i * kDim) + j];
-		Out[outRow * outWidth + outCol] = acc;
-	}
+	double acc = 0; 
+	for (int i = 0; i < kDim; ++i)
+		for (int j = 0; j < kDim; ++j)
+			acc += In[(outRow + i) * inWidth + (outCol + j)] * K[(i * kDim) + j]; // Sum of input elements multiplied by mask elements
+	Out[outRow * outWidth + outCol] = acc;
 }
 
 int main() {
+	vector<double> hIn, hKernel, hOut;
+	int inCols, inRows;
+	int kDim, kRadius;
+	int outCols, outRows;
+	int max = 0;
+	double* dIn, * dKernel, * dOut;
+	double bw = 8;
 
 	/*
 	 * Load image into OpenCV matrix and transfer to vector as linearized matrix
 	*/
 
-	Mat image = imread("Dude.jpg", IMREAD_GRAYSCALE);
+	Mat image = imread("Pikachu.jpg", IMREAD_GRAYSCALE);
 	if (!image.data) {
 		cout << "Could not open image file." << endl;
 		return -1;
 	}
 	
-	vector<double> hIn;
 	if (image.isContinuous())
 		hIn.assign(image.data, image.data + image.total());
-	int inCols = image.cols;
-	int inRows = image.rows;
+	inCols = image.cols;
+	inRows = image.rows;
 
 	/*
 	 * Set mask dimensions and determine whether image and masks dimensions are compatible
 	*/
 
-	int kDim = 21; // Kernel is square and odd in dimension, should be variable at some point
+	kDim = 9; // Kernel is square and odd in dimension, should be variable at some point
 	if ((inRows < 2 * kDim + 1) || (inCols < 2 * kDim + 1)) {
 		cout << "Image is too small to apply kernel effectively." << endl;
 		return -1;
 	}
-	int kRadius = floor(kDim / 2.0); // Radius of odd kernel doesn't consider middle index
-	vector<double> hKernel(pow(kDim, 2));
-	generateGaussian(hKernel, kDim, kRadius); // 
+	kRadius = floor(kDim / 2.0); // Radius of odd kernel doesn't consider middle index
+	hKernel.resize(pow(kDim, 2), 0);
+	generateGaussian(hKernel, kDim, kRadius);
 
-	int outCols = inCols - (2 * kRadius);
-	int outRows = inRows - (2 * kRadius);
-	vector<double> hOut(outCols * outRows);
-	fill(hOut.begin(), hOut.end(), 0);
+	// Trim output matrix to account for kernel radius
+	outCols = inCols - (2 * kRadius);
+	outRows = inRows - (2 * kRadius);
+	// Trim output matrix even further to match multiple of block dimensions
+	// Performing this trim removes the possibility of any blocks exceeding image boundaries
+	outCols = bw * floor(outCols / bw);
+	outRows = bw * floor(outRows / bw);
+	hOut.resize(outCols * outRows, 0);
 
 	/*
 	 * Device matrices allocation and copying
 	*/
 
-	double* dIn, * dKernel, * dOut;
 	errCatch(cudaMalloc((void**)& dIn, vBytes(hIn)));
 	errCatch(cudaMemcpy(dIn, hIn.data(), vBytes(hIn), cudaMemcpyHostToDevice));
 	errCatch(cudaMalloc((void**)& dKernel, vBytes(hKernel)));
@@ -111,9 +112,9 @@ int main() {
 	 * Kernel configuration and launch
 	*/
 
-	dim3 dimBlock(8, 8);
-	dim3 dimGrid(ceil(outCols / 8.0), ceil(outRows / 8.0));
-	Gaussian <<<dimGrid, dimBlock>>> (dIn, dKernel, dOut, kDim, kRadius, inCols, inRows, outCols, outRows);
+	dim3 dimBlock(bw, bw);
+	dim3 dimGrid(outCols / bw, outRows / bw);
+	Gaussian <<<dimGrid, dimBlock>>> (dIn, dKernel, dOut, kDim, inCols, outCols);
 	errCatch(cudaDeviceSynchronize());
 	errCatch(cudaMemcpy(hOut.data(), dOut, vBytes(hOut), cudaMemcpyDeviceToHost));
 	errCatch(cudaDeviceSynchronize());
@@ -122,7 +123,6 @@ int main() {
 	 * Normalizing output matrix values
 	*/
 
-	int max = 0;
 	for (auto& value : hOut)
 		max = (value > max) ? value : max;
 	for (auto& value : hOut)
@@ -132,8 +132,8 @@ int main() {
 	 * Converting output matrix to OpenCV Mat type
 	*/
 
-	vector<int> temp(hOut.begin(), hOut.end());
-	Mat blurImg = Mat(temp).reshape(0, outRows);
+	vector<int> toInt(hOut.begin(), hOut.end()); // Converting from double to integer matrix
+	Mat blurImg = Mat(toInt).reshape(0, outRows);
 	blurImg.convertTo(blurImg, CV_8UC1);
 
 	/*
@@ -144,10 +144,9 @@ int main() {
 	imshow("Original Image", image);
 	namedWindow("Blurred Image", WINDOW_AUTOSIZE);
 	imshow("Blurred Image", blurImg);
-
 	waitKey(0);
-	image.release();
 
+	image.release();
 	errCatch(cudaFree(dIn));
 	errCatch(cudaFree(dKernel));
 	errCatch(cudaFree(dOut));
