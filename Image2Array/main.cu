@@ -1,5 +1,3 @@
-// You finished making the gaussian kernel. The next part is to apply it to the matrix with the stuff you wrote down.
-
 #include <device_launch_parameters.h>
 #include <cuda_runtime.h>
 #include <opencv2/opencv.hpp>
@@ -9,11 +7,13 @@
 using namespace cv;
 using namespace std;
 
+// Returns the size in bytes of any type of vector
 template<typename T>
 size_t vBytes(const typename vector<T>& v) {
 	return sizeof(T)*v.size();
 }
 
+// Catches errors returned from CUDA functions
 __host__
 void errCatch(cudaError_t err) {
 	if (err != cudaSuccess) {
@@ -22,93 +22,123 @@ void errCatch(cudaError_t err) {
 	}
 }
 
+// This function takes a linearized matrix in the form of a vector and
+// calculates elements according to the 2D Gaussian distribution
 __host__
 void generateGaussian(vector<double>& K, int dim, int radius) {
 	double stdev = 1.0;
 	double pi = 355.0 / 113.0;
 	double constant = 1.0 / (2.0 * pi * pow(stdev, 2));
 
-	for (int i = -radius; i < radius + 1; ++i) {
+	// The following for-loops will iterate through the rows and columns
+	// of the mask, assigning different values to each element depending 
+	// on its 2D location in the matrix
+	for (int i = -radius; i < radius + 1; ++i)
 		for (int j = -radius; j < radius + 1; ++j)
 			K[(i + radius) * dim + (j + radius)] = constant * (1 / exp((pow(i, 2) + pow(j, 2)) / (2 * pow(stdev, 2))));
-	}
 }
 
+// CUDA kernel, it performs the image convolution
 __global__
-void Gaussian(double* M, double* K, double* Res, int kDim, int kRadius, int mWidth, int mHeight) {
-	int col = (blockIdx.x * blockDim.x) + threadIdx.x;
-	int row = (blockIdx.y * blockDim.y) + threadIdx.y;
+void Gaussian(double* In, double* K, double* Out, int kDim, int kRadius, int inWidth, int inHeight, int outWidth, int outHeight) {
+	int outCol = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int outRow = (blockIdx.y * blockDim.y) + threadIdx.y;
+	int inCol = outCol + kRadius; // Mapping from the output matrix elements to the input matrix elements
+	int inRow = outRow + kRadius;
 
-	if ((row - kRadius > 0) && (col - kRadius > 0) && (row + kRadius < mHeight) && (col + kRadius < mWidth)) {
+	if(outCol < outWidth && outRow < outHeight) { // Filter threads outside the range of the image
 		double acc = 0; 
-		int rStart = row - kRadius, cStart = col - kRadius;
-		for (int i = 0; i < kDim; ++i) {
+		int rowStart = inRow - kRadius; // Specifies top left element as the location to begin applying mask
+		int colStart = inCol - kRadius;
+
+		// Loop through mask elements
+		for (int i = 0; i < kDim; ++i)
 			for (int j = 0; j < kDim; ++j)
-				acc += M[(rStart + i) * mWidth + (cStart + j)] * K[(i * kDim) + j];
-		}
-		Res[row * mWidth + col] = acc;
+				acc += In[(rowStart + i) * inWidth + (colStart + j)] * K[(i * kDim) + j];
+		Out[outRow * outWidth + outCol] = acc;
 	}
 }
 
 int main() {
-	Mat image = imread("Pikachu.jpg", IMREAD_GRAYSCALE);
+
+	/*
+	 * Load image into OpenCV matrix and transfer to vector as linearized matrix
+	*/
+
+	Mat image = imread("Dude.jpg", IMREAD_GRAYSCALE);
 	if (!image.data) {
 		cout << "Could not open image file." << endl;
 		return -1;
 	}
-
-	int depth = image.depth();
-	int channels = image.channels();
-	int type = image.type();
 	
-	vector<double> hMatrix;
+	vector<double> hIn;
 	if (image.isContinuous())
-		hMatrix.assign(image.data, image.data + image.total());
+		hIn.assign(image.data, image.data + image.total());
+	int inCols = image.cols;
+	int inRows = image.rows;
 
-	int kDim = 3; // Kernel is square and odd in dimension, should be variable at some point
-	if ((image.rows < 2 * kDim + 1) || (image.cols < 2 * kDim + 1)) {
+	/*
+	 * Set mask dimensions and determine whether image and masks dimensions are compatible
+	*/
+
+	int kDim = 21; // Kernel is square and odd in dimension, should be variable at some point
+	if ((inRows < 2 * kDim + 1) || (inCols < 2 * kDim + 1)) {
 		cout << "Image is too small to apply kernel effectively." << endl;
 		return -1;
 	}
 	int kRadius = floor(kDim / 2.0); // Radius of odd kernel doesn't consider middle index
 	vector<double> hKernel(pow(kDim, 2));
-	generateGaussian(hKernel, kDim, kRadius);
+	generateGaussian(hKernel, kDim, kRadius); // 
 
-	//int rCols = image.cols - (2 * kRadius);
-	//int rRows = image.rows - (2 * kRadius);
-	//vector<double> hRes(rCols * rRows);
-	vector<double> hRes(image.rows * image.cols);
-	fill(hRes.begin(), hRes.end(), 0);
+	int outCols = inCols - (2 * kRadius);
+	int outRows = inRows - (2 * kRadius);
+	vector<double> hOut(outCols * outRows);
+	fill(hOut.begin(), hOut.end(), 0);
 
-	// Device stuff
-	double* dMatrix, * dKernel, * dRes;
-	errCatch(cudaMalloc((void**)& dMatrix, vBytes(hMatrix)));
-	errCatch(cudaMemcpy(dMatrix, hMatrix.data(), vBytes(hMatrix), cudaMemcpyHostToDevice));
+	/*
+	 * Device matrices allocation and copying
+	*/
 
-	cudaMalloc((void**)& dKernel, vBytes(hKernel));
-	cudaMemcpy(dKernel, hKernel.data(), vBytes(hKernel), cudaMemcpyHostToDevice);
-	cudaMalloc((void**)& dRes, vBytes(hRes));
-	cudaMemcpy(dRes, hRes.data(), vBytes(hRes), cudaMemcpyHostToDevice);
+	double* dIn, * dKernel, * dOut;
+	errCatch(cudaMalloc((void**)& dIn, vBytes(hIn)));
+	errCatch(cudaMemcpy(dIn, hIn.data(), vBytes(hIn), cudaMemcpyHostToDevice));
+	errCatch(cudaMalloc((void**)& dKernel, vBytes(hKernel)));
+	errCatch(cudaMemcpy(dKernel, hKernel.data(), vBytes(hKernel), cudaMemcpyHostToDevice));
+	errCatch(cudaMalloc((void**)& dOut, vBytes(hOut)));
+	errCatch(cudaMemcpy(dOut, hOut.data(), vBytes(hOut), cudaMemcpyHostToDevice));
+
+	/*
+	 * Kernel configuration and launch
+	*/
 
 	dim3 dimBlock(8, 8);
-	dim3 dimGrid(ceil(image.cols / 8.0), ceil(image.rows / 8.0));
-	Gaussian <<<dimGrid, dimBlock>>> (dMatrix, dKernel, dRes, kDim, kRadius, image.cols, image.rows);
-	cudaDeviceSynchronize();
-	cudaMemcpy(hRes.data(), dRes, vBytes(hRes), cudaMemcpyDeviceToHost);
-	cudaDeviceSynchronize();
+	dim3 dimGrid(ceil(outCols / 8.0), ceil(outRows / 8.0));
+	Gaussian <<<dimGrid, dimBlock>>> (dIn, dKernel, dOut, kDim, kRadius, inCols, inRows, outCols, outRows);
+	errCatch(cudaDeviceSynchronize());
+	errCatch(cudaMemcpy(hOut.data(), dOut, vBytes(hOut), cudaMemcpyDeviceToHost));
+	errCatch(cudaDeviceSynchronize());
+
+	/*
+	 * Normalizing output matrix values
+	*/
 
 	int max = 0;
-	for (auto& value : hRes)
+	for (auto& value : hOut)
 		max = (value > max) ? value : max;
-	for (auto& value : hRes)
+	for (auto& value : hOut)
 		value = (value * 255) / max;
 
-	vector<int> temp(hRes.begin(), hRes.end());
+	/*
+	 * Converting output matrix to OpenCV Mat type
+	*/
 
-	//Mat blurImg = Mat(rRows, rCols, CV_8UC1, temp.data(), sizeof(int)*(rCols));
-	//Mat blurImg = Mat(image.rows, image.cols, CV_8UC1, temp.data(), sizeof(int)*(image.cols));
-	Mat blurImg = Mat(temp).reshape(0, 475);
+	vector<int> temp(hOut.begin(), hOut.end());
+	Mat blurImg = Mat(temp).reshape(0, outRows);
 	blurImg.convertTo(blurImg, CV_8UC1);
+
+	/*
+	 * Display blurred image
+	*/
 
 	namedWindow("Original Image", WINDOW_AUTOSIZE);
 	imshow("Original Image", image);
@@ -117,4 +147,8 @@ int main() {
 
 	waitKey(0);
 	image.release();
+
+	errCatch(cudaFree(dIn));
+	errCatch(cudaFree(dKernel));
+	errCatch(cudaFree(dOut));
 }
