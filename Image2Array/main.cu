@@ -7,57 +7,21 @@
 using namespace cv;
 using namespace std;
 
-// Returns the size in bytes of any type of vector
-template<typename T>
-size_t vBytes(const typename vector<T>& v) {
-	return sizeof(T)*v.size();
-}
+#define MAX_KERNEL_WIDTH 441
+__constant__ double K[MAX_KERNEL_WIDTH];
 
-// Catches errors returned from CUDA functions
-__host__
-void errCatch(cudaError_t err) {
-	if (err != cudaSuccess) {
-		cout << cudaGetErrorString(err) << " in " << __FILE__ << " at line " << __LINE__ << endl;
-		exit(EXIT_FAILURE);
-	}
-}
-
-// This function takes a linearized matrix in the form of a vector and
-// calculates elements according to the 2D Gaussian distribution
-__host__
-void generateGaussian(vector<double>& K, int dim, int radius) {
-	double stdev = 5.0;
-	double pi = 355.0 / 113.0;
-	double constant = 1.0 / (2.0 * pi * pow(stdev, 2));
-
-	// The following for-loops will iterate through the rows and columns
-	// of the mask, assigning different values to each element depending 
-	// on its 2D location in the matrix
-	for (int i = -radius; i < radius + 1; ++i)
-		for (int j = -radius; j < radius + 1; ++j)
-			K[(i + radius) * dim + (j + radius)] = constant * (1 / exp((pow(i, 2) + pow(j, 2)) / (2 * pow(stdev, 2))));
-}
-
-// CUDA kernel, it performs the image convolution
-__global__
-void Gaussian(double* In, double* K, double* Out, int kDim, int inWidth, int outWidth) {
-	int outCol = (blockIdx.x * blockDim.x) + threadIdx.x;
-	int outRow = (blockIdx.y * blockDim.y) + threadIdx.y;
-
-	double acc = 0; 
-	for (int i = 0; i < kDim; ++i)
-		for (int j = 0; j < kDim; ++j)
-			acc += In[(outRow + i) * inWidth + (outCol + j)] * K[(i * kDim) + j]; // Sum of input elements multiplied by mask elements
-	Out[outRow * outWidth + outCol] = acc;
-}
+__global__ void Gaussian(double*, double*, int, int, int);
+__host__ void generateGaussian(vector<double>&, int, int);
+__host__ void errCatch(cudaError_t);
+template<typename T> size_t vBytes(const typename vector<T>&);
 
 int main() {
 	vector<double> hIn, hKernel, hOut;
+	double* dIn, * dOut;
 	int inCols, inRows;
 	int kDim, kRadius;
 	int outCols, outRows;
 	int max = 0;
-	double* dIn, * dKernel, * dOut;
 	double bw = 8;
 
 	/*
@@ -65,13 +29,11 @@ int main() {
 	*/
 
 	Mat image = imread("Pikachu.jpg", IMREAD_GRAYSCALE);
-	if (!image.data) {
+	if (!image.data || !image.isContinuous()) {
 		cout << "Could not open image file." << endl;
-		return -1;
-	}
-	
-	if (image.isContinuous())
-		hIn.assign(image.data, image.data + image.total());
+		exit(EXIT_FAILURE);
+	}	
+	hIn.assign(image.data, image.data + image.total());
 	inCols = image.cols;
 	inRows = image.rows;
 
@@ -82,7 +44,7 @@ int main() {
 	kDim = 9; // Kernel is square and odd in dimension, should be variable at some point
 	if ((inRows < 2 * kDim + 1) || (inCols < 2 * kDim + 1)) {
 		cout << "Image is too small to apply kernel effectively." << endl;
-		return -1;
+		exit(EXIT_FAILURE);
 	}
 	kRadius = floor(kDim / 2.0); // Radius of odd kernel doesn't consider middle index
 	hKernel.resize(pow(kDim, 2), 0);
@@ -103,10 +65,9 @@ int main() {
 
 	errCatch(cudaMalloc((void**)& dIn, vBytes(hIn)));
 	errCatch(cudaMemcpy(dIn, hIn.data(), vBytes(hIn), cudaMemcpyHostToDevice));
-	errCatch(cudaMalloc((void**)& dKernel, vBytes(hKernel)));
-	errCatch(cudaMemcpy(dKernel, hKernel.data(), vBytes(hKernel), cudaMemcpyHostToDevice));
 	errCatch(cudaMalloc((void**)& dOut, vBytes(hOut)));
 	errCatch(cudaMemcpy(dOut, hOut.data(), vBytes(hOut), cudaMemcpyHostToDevice));
+	errCatch(cudaMemcpyToSymbol(K, hKernel.data(), vBytes(hKernel)));
 
 	/*
 	 * Kernel configuration and launch
@@ -114,7 +75,7 @@ int main() {
 
 	dim3 dimBlock(bw, bw);
 	dim3 dimGrid(outCols / bw, outRows / bw);
-	Gaussian <<<dimGrid, dimBlock>>> (dIn, dKernel, dOut, kDim, inCols, outCols);
+	Gaussian <<<dimGrid, dimBlock>>> (dIn, dOut, kDim, inCols, outCols);
 	errCatch(cudaDeviceSynchronize());
 	errCatch(cudaMemcpy(hOut.data(), dOut, vBytes(hOut), cudaMemcpyDeviceToHost));
 	errCatch(cudaDeviceSynchronize());
@@ -148,6 +109,48 @@ int main() {
 
 	image.release();
 	errCatch(cudaFree(dIn));
-	errCatch(cudaFree(dKernel));
 	errCatch(cudaFree(dOut));
+
+	exit(EXIT_SUCCESS);
+}
+
+// CUDA kernel, it performs the image convolution
+__global__
+void Gaussian(double* In, double* Out, int kDim, int inWidth, int outWidth) {
+	int outCol = (blockIdx.x * blockDim.x) + threadIdx.x;
+	int outRow = (blockIdx.y * blockDim.y) + threadIdx.y;
+
+	double acc = 0; 
+	for (int i = 0; i < kDim; ++i)
+		for (int j = 0; j < kDim; ++j)
+			acc += In[(outRow + i) * inWidth + (outCol + j)] * K[(i * kDim) + j]; // Sum of input elements multiplied by mask elements
+	Out[outRow * outWidth + outCol] = acc;
+}
+
+// This function takes a linearized matrix in the form of a vector and
+// calculates elements according to the 2D Gaussian distribution
+__host__
+void generateGaussian(vector<double>& K, int dim, int radius) {
+	double stdev = 5.0;
+	double pi = 355.0 / 113.0;
+	double constant = 1.0 / (2.0 * pi * pow(stdev, 2));
+
+	for (int i = -radius; i < radius + 1; ++i)
+		for (int j = -radius; j < radius + 1; ++j)
+			K[(i + radius) * dim + (j + radius)] = constant * (1 / exp((pow(i, 2) + pow(j, 2)) / (2 * pow(stdev, 2))));
+}
+
+// Catches errors returned from CUDA functions
+__host__
+void errCatch(cudaError_t err) {
+	if (err != cudaSuccess) {
+		cout << cudaGetErrorString(err) << " in " << __FILE__ << " at line " << __LINE__ << endl;
+		exit(EXIT_FAILURE);
+	}
+}
+
+// Returns the size in bytes of any type of vector
+template<typename T>
+size_t vBytes(const typename vector<T>& v) {
+	return sizeof(T)*v.size();
 }

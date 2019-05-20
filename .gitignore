@@ -1,3 +1,5 @@
 
 .vs/Image2Array/v16/Browse.VC.opendb
 *.log
+*.ipch
+.vs/Image2Array/v16/ipch/AutoPCH/b6106ad44721629/MAIN.ipch

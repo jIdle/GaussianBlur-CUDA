@@ -1,9 +1,7 @@
 {
   "ExpandedNodes": [
     "",
-    "\\Image2Array",
-    "\\x64",
-    "\\x64\\Debug"
+    "\\Image2Array"
   ],
   "SelectedNode": "\\Image2Array\\main.cu",
   "PreviewInSolutionExplorer": false
