@@ -1,5 +1,8 @@
-
-.vs/Image2Array/v16/Browse.VC.opendb
-*.log
-*.ipch
-.vs/Image2Array/v16/ipch/AutoPCH/b6106ad44721629/MAIN.ipch
+x64/*
+Image2Array.sln
+Image2Array.aps
+Image2Array.rc
+Image2Array.vcxproj
+Image2Array.vcxproj.filters
+Image2Array.vcxproj.user
+resource.h
