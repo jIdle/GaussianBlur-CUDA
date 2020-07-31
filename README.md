@@ -6,4 +6,11 @@ OpenCV is necessary for this program to work. While all image processing is done
 
 This implementation was used in my performance analysis:
 
-![Comparing 2D Convolution Performance](https://github.com/jIdle/GaussianBlur-CUDA/blob/master/Report/CS405-Project-Report.pdf)
+[Comparing 2D Convolution Performance](https://github.com/jIdle/GaussianBlur-CUDA/blob/master/Report/CS405-Project-Report.pdf)
+
+
+# Example
+## Initial Image
+![Image of Pikachu before convolution](https://github.com/jIdle/GaussianBlur-CUDA/blob/master/Images/Pikachu.jpg)
+## Convolved Image
+![Image of Pikachu after convolution](https://github.com/jIdle/GaussianBlur-CUDA/blob/master/Example/ConvolvedImage.png)
